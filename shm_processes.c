@@ -1,117 +1,149 @@
-#include <semaphore.h>
-#include <stdio.h>
-#include <errno.h>
-#include <stdlib.h>
+#include  <stdio.h>
+#include  <stdlib.h>
+#include  <sys/types.h>
+#include  <sys/ipc.h>
+#include  <sys/shm.h>
 #include <unistd.h>
-#include <sys/types.h>
-
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <sys/mman.h>
-
-#include <sys/ipc.h>
-#include <sys/shm.h>
 #include <sys/wait.h>
+#include <semaphore.h>
+#include <fcntl.h>
 
-void deposit_money(int* BankAccount);
-void withdraw_money(int* BankAccount);
+void DadProcess(int [], sem_t *);
+void ChildProcess(int [], sem_t *, int);
+void MomProcess(int [], sem_t *);
 
-int main(int  argc, char *argv[]){
-	
-  int ShmID;
-  int *ShmPTR;
-  pid_t pid;
-  int status;
-  int fd;
-  int i; 
-  int nloop = 5; 
-  int zero = 0; 
-  int *counter_ptr;
-  sem_t *mutex; 
-
-  //open a file and map it into memory this is to hold the shared counter
-  fd = open("log.txt",O_RDWR|O_CREAT,S_IRWXU);
-  write(fd,&zero,sizeof(int));
-  counter_ptr = mmap(NULL,sizeof(int),PROT_READ| PROT_WRITE,MAP_SHARED,fd,0);
-  close(fd);
-
-/* create, initialize semaphore */
-	if ((mutex = sem_open("examplesemaphore", O_CREAT, 0644, 1)) == SEM_FAILED) { // create, initialize semaphore 
-		perror("semaphore initilization");
+int  main(int  argc, char *argv[]) {
+  if (argc < 3) {
+    printf("usage:  shm_proc <parents> <children> (where parent = [1 | 2], children = [N > 0]\n");
     exit(1);
   }
   
-	pid = fork();
-  if (pid > 0) {
-        
-		for (i = 0; i>-1; i++){
-			sleep(rand()%6);
-      printf("Dear Old Dad: Attempting to Check Balance\n");\
-      sem_wait(mutex);
-      int random_int = rand()%101;
-			if (random_int % 2 == 0){
-				if (*counter_ptr < 100){
-					deposit_money(counter_ptr);
-				} 
-				else {
-					printf("Dear Old Dad: Thinks Student has enough Cash ($%d)\n", *counter_ptr);
-        }
-			}
-			else{
-				printf("Dear Old Dad: Last Checking Balance = $%d\n", *counter_ptr);
+  int parents = atoi(argv[1]);
+  if (parents != 1 && parents != 2) {
+    printf("parents should be either 1 or 2\n");
+    exit(1);
+  }
+  
+  int childs = atoi(argv[2]);
+  if (childs <= 0) {
+    printf("childs should be > 0 i.e., at least 1\n");
+    exit(1);
+  }
+  
+  int shmID;
+  int *shmPTR;
+  int total = childs + parents;
+  pid_t pid[total];
+  sem_t *mutex;
+
+  shmID = shmget(IPC_PRIVATE, sizeof(int), IPC_CREAT | 0666);
+  if (shmID < 0) {
+    printf("*** shmget error ***\n");
+    exit(1);
+  }
+  shmPTR = (int *) shmat(shmID, NULL, 0);
+  if (*shmPTR == -1) {
+    printf("*** shmat error ***\n");
+    exit(1);
+  }
+  shmPTR[0] = 0;
+  
+  if ((mutex = sem_open("banksemaphore", O_CREAT, 0644, 1)) == SEM_FAILED) {
+    perror("semaphore initilization");
+    exit(1);
+  }
+
+  for (int i=0; i<total; i++) {
+    pid[i] = fork();
+    if (pid[i] < 0) {
+      printf("fork failed!");
+      exit(1);
+    } else if (pid[i] == 0) {
+      if (i == 0) {
+        DadProcess(shmPTR, mutex);
+      } else if (parents == 2 && i == 2) {
+        MomProcess(shmPTR, mutex);
+      } else {
+        ChildProcess(shmPTR, mutex, i);
       }
-      sem_post(mutex);              
+      exit(0);
     }
-		exit(1);
-	}
-	else if (pid == 0) {
-		for (i = 0; i>-1; i++){
-			sleep(rand()%6);
-      printf("Poor Student: Attempting to Check Balance\n");  
-      sem_wait(mutex);
-      int random_int = rand();
-      if (random_int%2 == 0){
-				withdraw_money(counter_ptr);
+  }
+  
+  for (int i=0; i<total; i++) {
+    wait(NULL);
+  }
+  
+  shmdt((void *) shmPTR);
+  shmctl(shmID, IPC_RMID, NULL);
+}
+
+void  ChildProcess(int sharedMem[], sem_t* mutex, int id) {
+  int account, randBal;
+  srand(getpid());
+
+  for (int i=0; i<5; i++) {
+    sleep(rand()%6);
+    printf("Poor Student #%d: Attempting to Check Balance\n", id);
+    sem_wait(mutex);
+		account = sharedMem[0];
+    randBal = rand() % 51;
+    printf("Poor Student #%d needs $%d\n", id, randBal);
+    if (rand()%2 == 0) {
+      if (randBal <= account) {
+        account -= randBal;
+        printf("Poor Student #%d: Withdraws $%d / Balance = $%d\n", id, randBal, account);
+        sharedMem[0] = account;
+      } else {
+        printf("Poor Student #%d: Not Enough Cash ($%d)\n", id, account);
       }
-			else{
-				printf("Poor Student: Last Checking Balance = $%d\n", *counter_ptr);
-      }
-      sem_post(mutex);    
     }
-    printf("   Client is about to exit\n");
-    exit(0);
-  }
-	wait(&status);
-  printf("Server has detected the completion of its child...\n");
-	printf("Server has detached its shared memory...\n");
-  printf("Server has removed its shared memory...\n");
-  printf("Server exits...\n");
-  exit(0);
-}
-/* deposit money funtion */
-void deposit_money(int* BankAccount){
-  int localBalance = *BankAccount;
-  int amount = rand() % 101;
-  if ((amount%2) == 0){
-    localBalance += amount;
-    printf("Dear Old Dad: Deposits $%d / Balance = $%d\n", amount, localBalance);
-    *BankAccount = localBalance;
-  }
-  else{
-    printf("Dear Old Dad: Doesn't have any money to give\n");
+    sem_post(mutex);
   }
 }
-/* withdraw money funtion */
-void withdraw_money(int* BankAccount){
-  int localBalance = *BankAccount;
-  int need = rand() % 51;
-  printf("Poor Student needs $%d\n", need);
-  if (need <= localBalance){
-    localBalance -= need;
-    printf("Poor Student: Withdraws $%d / Balance = $%d\n", need, localBalance);
-    *BankAccount = localBalance;
+
+void DadProcess(int sharedMem[], sem_t* mutex) {
+  int account, randBal;
+  srand(getpid());
+
+  for (int i=0; i<5; i++) {
+    sleep(rand()%6);
+    printf("Dear Old Dad: Attempting to Check Balance\n");
+    sem_wait(mutex);
+    account = sharedMem[0];
+    if (account <= 100) {
+      randBal = rand()%101;
+      if (randBal % 2) {
+        account += randBal;
+        printf("Dear old Dad: Deposits $%d / Balance = $%d\n", randBal, account);
+        sharedMem[0] = account;
+      } else {
+        printf("Dear old Dad: Doesn't have any money to give\n");
+      }
+    } else {
+      printf("Dear old Dad: Thinks Student has enough Cash ($%d)\n", account);
+    }
+    sem_post(mutex);
   }
-	else{
-    ("Poor Student: Not Enough Cash ($%d)\n", localBalance);
+}
+
+void MomProcess(int sharedMem[], sem_t* mutex) {
+  int account, randBal;
+  srand(getpid());
+
+  for (int i=0; i<5; i++) {
+    sleep(rand()%10);
+    printf("Loveable Mom: Attempting to Check Balance\n");
+    sem_wait(mutex);
+    account = sharedMem[0];
+    if (account <= 100) {
+      randBal = rand()%126;
+      account += randBal;
+      printf("Lovable Mom: Deposits $%d / Balance = $%d\n", randBal, account);
+      sharedMem[0] = account;
+    } else {
+      printf("Lovable Mom: Thinks Student has enough Cash ($%d)\n", account);
+    }
+    sem_post(mutex);
   }
 }
