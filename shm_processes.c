@@ -1,3 +1,7 @@
+/*
+Joshua Clemons @02914187
+collaborated with asha anderson
+*/
 #include  <stdio.h>
 #include  <stdlib.h>
 #include  <sys/types.h>
